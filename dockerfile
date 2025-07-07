@@ -4,7 +4,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # Build the Go application with CGO disabled for static linking
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o doc2paperless -ldflags "-X 'main.version=${{ env.tag }}'"
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o doc2paperless -ldflags "-X 'main.version=${VERSION}'"
 
 
 FROM alpine:3.22.0
