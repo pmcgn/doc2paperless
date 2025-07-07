@@ -37,32 +37,30 @@ func init() {
 	prometheus.MustRegister(successfulUploads, failedUploads, uploadRetries)
 
 	os.Setenv("CONSUME_FOLDER", "/consumefolder")
-	os.Setenv("PAPERLESS_BASE_URL", "http://localhost:8000")
 	os.Setenv("HTTP_UPLOAD_RETRY_DELAY_SECONDS", "5s")
 	os.Setenv("FILE_STABILITY_CHECK_COUNT", "3")
 	os.Setenv("FILE_STABILITY_CHECK_INTERVAL_SECONDS", "10s")
-	os.Setenv("PAPERLESS_AUTH_TOKEN", "281298728b981fb7c86d14a77f85e686974e6c4c")
+	//os.Setenv("PAPERLESS_AUTH_TOKEN", "281298728b981fb7c86d14a77f85e686974e6c4c")
+	//os.Setenv("PAPERLESS_BASE_URL", "http://localhost:8000")
 }
 
 func main() {
 	log.Println("Starting doc2paperless Version: " + version)
 
-	// Load configuration from environment variables
 	loadConfig()
 
-	// Start Prometheus metrics server
 	http.Handle("/metrics", promhttp.Handler())
+	http.HandleFunc("/health/liveness", livenessHandler)
+	http.HandleFunc("/health/readiness", readinessHandler)
+
 	go func() {
 		log.Fatal(http.ListenAndServe(":2112", nil))
 	}()
 
-	// Start file watcher
 	go watchFiles()
 
-	// Start file stability checker
 	go checkFileStability()
 
-	// Start file uploader
 	uploadFiles()
 
 	select {} // Block forever
@@ -94,6 +92,17 @@ func loadConfig() {
 	if err != nil {
 		retryDelay = 5 * time.Second
 	}
+}
+
+func livenessHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
+func readinessHandler(w http.ResponseWriter, r *http.Request) {
+	// Implement a real readiness check if needed
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
 }
 
 func watchFiles() {
