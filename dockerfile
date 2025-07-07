@@ -1,4 +1,5 @@
 FROM golang:1.24.4 AS builder
+ARG VERSION
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
@@ -9,7 +10,6 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o doc2paperless -ldflags "-X
 
 FROM alpine:3.22.0
 
-ARG VERSION
 RUN apk add --no-cache tzdata
 ENV TZ=Europe/Berlin
 RUN ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
