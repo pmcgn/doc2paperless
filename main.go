@@ -30,20 +30,23 @@ var (
 	fileStabilityCheckInterval time.Duration
 	fileStabilityCheckCount    int
 	retryDelay                 time.Duration
+	version                    = "dev"
 )
 
 func init() {
 	prometheus.MustRegister(successfulUploads, failedUploads, uploadRetries)
 
-	os.Setenv("WATCH_PATH", "/consumefolder")
+	os.Setenv("CONSUME_FOLDER", "/consumefolder")
 	os.Setenv("PAPERLESS_BASE_URL", "http://localhost:8000")
-	os.Setenv("RETRY_DELAY", "5s")
-	os.Setenv("STABILITY_CHECKS", "3")
-	os.Setenv("CHECK_INTERVAL", "1s")
+	os.Setenv("HTTP_UPLOAD_RETRY_DELAY_SECONDS", "5s")
+	os.Setenv("FILE_STABILITY_CHECK_COUNT", "3")
+	os.Setenv("FILE_STABILITY_CHECK_INTERVAL_SECONDS", "10s")
 	os.Setenv("PAPERLESS_AUTH_TOKEN", "281298728b981fb7c86d14a77f85e686974e6c4c")
 }
 
 func main() {
+	log.Println("Starting doc2paperless Version: " + version)
+
 	// Load configuration from environment variables
 	loadConfig()
 
@@ -69,12 +72,15 @@ func loadConfig() {
 	var err error
 	paperlessBaseURL = os.Getenv("PAPERLESS_BASE_URL")
 	paperlessAuthToken = os.Getenv("PAPERLESS_AUTH_TOKEN")
-	watchPath = os.Getenv("WATCH_PATH")
+	watchPath = os.Getenv("CONSUME_FOLDER")
 	if paperlessBaseURL == "" || watchPath == "" {
-		log.Fatal("Missing required environment variables: PAPERLESS_BASE_URL, WATCH_PATH")
+		log.Fatal("Missing required environment variables: PAPERLESS_BASE_URL, CONSUME_FOLDER")
+	}
+	if paperlessAuthToken == "" {
+		log.Fatal("Environment Variable PAPERLESS_AUTH_TOKEN not set. Note: Currently only Auth token are supported, not Base64(user:pass)")
 	}
 
-	fileStabilityCheckInterval, err = time.ParseDuration(os.Getenv("FILE_STABILITY_CHECK_INTERVAL"))
+	fileStabilityCheckInterval, err = time.ParseDuration(os.Getenv("FILE_STABILITY_CHECK_INTERVAL_SECONDS"))
 	if err != nil {
 		fileStabilityCheckInterval = 2 * time.Second
 	}
@@ -84,7 +90,7 @@ func loadConfig() {
 		fmt.Sscanf(count, "%d", &fileStabilityCheckCount)
 	}
 
-	retryDelay, err = time.ParseDuration(os.Getenv("RETRY_DELAY"))
+	retryDelay, err = time.ParseDuration(os.Getenv("HTTP_UPLOAD_RETRY_DELAY_SECONDS"))
 	if err != nil {
 		retryDelay = 5 * time.Second
 	}
