@@ -20,6 +20,7 @@ The following table outlines the environment variables that can be used to confi
 | `HTTP_UPLOAD_RETRY_DELAY_SECONDS`        | Delay between upload retries.                                        | `5s`                       | No        |
 | `FILE_STABILITY_CHECK_INTERVAL_SECONDS`  | Interval between file stability checks.                              | `10s`                      | No        |
 | `FILE_STABILITY_CHECK_COUNT`             | Number of times to check file stability before upload.               | `3`                        | No        |
+| `FILE_CONSUME_WHITELIST`                 | Whitelist of file types to be pushed. Comma Separated List.          | `*.pdf`<br>`*.pdf,*.txt`                     | No        |
 | `TZ`                                     | Timezone for the application.                                        | `Europe/Berlin`             | No        |
 
 There is a mechanis in place (like in paperless-ngx), to detect if a file is completely uploaded by the Scanner. Before a file is pushed to Paperless-ngx, the filesize must not change over multiple consecutive checks. `doc2paperless` will check the filesize every `FILE_STABILITY_CHECK_INTERVAL_SECONDS`. If the size has not changed for `FILE_STABILITY_CHECK_COUNT` cycles, it will upload and delete (!) the file.

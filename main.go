@@ -31,12 +31,14 @@ var (
 	fileStabilityCheckCount    int
 	retryDelay                 time.Duration
 	version                    = "dev"
+	whitelist                  string
 )
 
 func init() {
 	prometheus.MustRegister(successfulUploads, failedUploads, uploadRetries)
 
 	os.Setenv("CONSUME_FOLDER", "/consumefolder")
+	os.Setenv("FILE_CONSUME_WHITELIST","*.pdf")
 	os.Setenv("HTTP_UPLOAD_RETRY_DELAY_SECONDS", "5s")
 	os.Setenv("FILE_STABILITY_CHECK_COUNT", "3")
 	os.Setenv("FILE_STABILITY_CHECK_INTERVAL_SECONDS", "10s")
@@ -68,6 +70,7 @@ func main() {
 
 func loadConfig() {
 	var err error
+	whitelist = os.Getenv("FILE_CONSUME_WHITELIST")
 	paperlessBaseURL = os.Getenv("PAPERLESS_BASE_URL")
 	paperlessAuthToken = os.Getenv("PAPERLESS_AUTH_TOKEN")
 	watchPath = os.Getenv("CONSUME_FOLDER")
@@ -83,7 +86,7 @@ func loadConfig() {
 		fileStabilityCheckInterval = 2 * time.Second
 	}
 
-	fileStabilityCheckCount = 5 // Default value
+	fileStabilityCheckCount = 5 
 	if count := os.Getenv("FILE_STABILITY_CHECK_COUNT"); count != "" {
 		fmt.Sscanf(count, "%d", &fileStabilityCheckCount)
 	}
@@ -123,7 +126,7 @@ func watchFiles() {
 		log.Fatal(err)
 	}
 	for _, file := range files {
-		if !file.IsDir() {
+		if !file.IsDir() && isWhitelisted(file.Name()) {
 			fileStabilityConfirmation <- filepath.Join(watchPath, file.Name())
 		}
 	}
@@ -248,4 +251,15 @@ func uploadFile(filePath string) error {
 	}
 
 	return nil
+}
+
+func isWhitelisted(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	whitelistedExtensions := strings.Split(strings.ToLower(whitelist), ",")
+	for _, pattern := range whitelistedExtensions {
+		if matched, _ := filepath.Match(pattern, ext); matched {
+			return true
+		}
+	}
+	return false
 }
