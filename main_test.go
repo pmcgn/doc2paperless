@@ -141,3 +141,40 @@ func TestFileStability(t *testing.T) {
 		t.Errorf("file stability check timed out")
 	}
 }
+
+func TestFileStabilityWithMultipleFiles(t *testing.T) {
+	fs := &MockFileSystem{
+		Files: map[string]*MockFile{
+			"/consumefolder/test.pdf": {FileName: "test.pdf", Content: []byte("PDF content"), FileSize: 12},
+			"/consumefolder/test.txt": {FileName: "test.txt", Content: []byte("Text content"), FileSize: 10},
+		},
+	}
+
+	// Simulate the stability check
+	fileStabilityCheckInterval = 1 * time.Millisecond
+	fileStabilityCheckCount = 3
+
+	go checkFileStability(fs)
+
+	// Send both files for stability confirmation
+	fileStabilityConfirmation <- "/consumefolder/test.pdf"
+	fileStabilityConfirmation <- "/consumefolder/test.txt"
+
+	// Check the result in the readyForUpload channel
+	select {
+	case filePath := <-readyForUpload:
+		if filePath != "/consumefolder/test.pdf" {
+			t.Errorf("expected /consumefolder/test.pdf, got %s", filePath)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Errorf("expected a file to be ready for upload, but none was found")
+	}
+
+	// Ensure no other files are pushed to the channel
+	select {
+	case filePath := <-readyForUpload:
+		t.Errorf("unexpected file pushed to channel: %s", filePath)
+	case <-time.After(10 * time.Millisecond):
+		// No additional files should be pushed
+	}
+}
