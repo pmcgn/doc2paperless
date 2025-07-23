@@ -18,7 +18,7 @@ The following table outlines the environment variables that can be used to confi
 | `PAPERLESS_AUTH_TOKEN`                   | Authentication token for the Paperless server.                       | *not set*<br>`281298728b981fb7c86d14a77f85e686974e6c4c` | Yes       |
 | `CONSUME_FOLDER`                         | Directory path to watch for new files. THERE IS NO NEED TO CHANGE THIS! Make sure to mount the correct hosth path into this folder   | `/consumefolder`           | No       |
 | `HTTP_UPLOAD_RETRY_DELAY_SECONDS`        | Delay between upload retries.                                        | `5s`                       | No        |
-| `FILE_STABILITY_CHECK_INTERVAL_SECONDS`  | Interval between file stability checks.                              | `10s`                      | No        |
+| `FILE_STABILITY_CHECK_INTERVAL_SECONDS`  | Interval between file stability checks.                              | `2s`                       | No        |
 | `FILE_STABILITY_CHECK_COUNT`             | Number of times to check file stability before upload.               | `3`                        | No        |
 | `FILE_CONSUME_WHITELIST`                 | Whitelist of file types to be pushed. Comma Separated List.          | `*.pdf`<br>`*.pdf,*.txt`                     | No        |
 | `TZ`                                     | Timezone for the application.                                        | `Europe/Berlin`             | No        |
