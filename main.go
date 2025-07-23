@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,7 @@ var (
 	retryDelay                 time.Duration
 	version                    = "dev"
 	whitelist                  string
+	verbose                    bool
 )
 
 type FileSystem interface {
@@ -72,19 +74,24 @@ func (RealHTTPClient) Do(req *http.Request) (*http.Response, error) {
 func init() {
 	prometheus.MustRegister(successfulUploads, failedUploads, uploadRetries)
 
-	os.Setenv("CONSUME_FOLDER", "/consumefolder")
+	os.Setenv("CONSUME_FOLDER", "c:/temp")
 	os.Setenv("FILE_CONSUME_WHITELIST", "*.pdf")
 	os.Setenv("HTTP_UPLOAD_RETRY_DELAY_SECONDS", "5s")
 	os.Setenv("FILE_STABILITY_CHECK_COUNT", "3")
-	os.Setenv("FILE_STABILITY_CHECK_INTERVAL_SECONDS", "10s")
-	//os.Setenv("PAPERLESS_AUTH_TOKEN", "281298728b981fb7c86d14a77f85e686974e6c4c")
-	//os.Setenv("PAPERLESS_BASE_URL", "http://localhost:8000")
+	os.Setenv("FILE_STABILITY_CHECK_INTERVAL_SECONDS", "2s")
+	//os.Setenv("PAPERLESS_AUTH_TOKEN", "57d6be2cd6968cf189dafcb989d4610d6274b923")
+	//os.Setenv("PAPERLESS_BASE_URL", "http://192.168.2.147:8000")
+	//os.Setenv("VERBOSE", "true")
 }
 
 func main() {
 	log.Println("Starting doc2paperless Version: " + version)
 
 	loadConfig()
+
+	if verbose {
+		log.Println("Verbose logging is enabled.")
+	}
 
 	http.Handle("/metrics", promhttp.Handler())
 	http.HandleFunc("/health/liveness", livenessHandler)
@@ -133,6 +140,16 @@ func loadConfig() {
 	if err != nil {
 		retryDelay = 5 * time.Second
 	}
+
+	verboseStr := os.Getenv("VERBOSE")
+	verbose = false
+
+	if verboseStr != "" {
+		parsedVerbose, err := strconv.ParseBool(verboseStr)
+		if err == nil {
+			verbose = parsedVerbose
+		}
+	}
 }
 
 func livenessHandler(w http.ResponseWriter, r *http.Request) {
@@ -175,7 +192,8 @@ func watchFiles(fs FileSystem) {
 			if !ok {
 				return
 			}
-			if event.Op&fsnotify.Create == fsnotify.Create {
+			if event.Op&fsnotify.Create == fsnotify.Create && isWhitelisted(event.Name) {
+				log.Println("Detected new file. Starting stability check for: " + event.Name)
 				fileStabilityConfirmation <- event.Name
 			}
 		case err, ok := <-watcher.Errors:
@@ -190,23 +208,36 @@ func watchFiles(fs FileSystem) {
 func checkFileStability(fs FileSystem) {
 	for filePath := range fileStabilityConfirmation {
 		go func(filePath string) {
-			stable := false
 			var lastSize int64
-			for i := 0; i < fileStabilityCheckCount; i++ {
+			consecutiveStableCount := 0
+
+			for {
+				if verbose {
+					log.Println("Checking stability for " + filePath + " Consecutive readings with same size: " + strconv.Itoa(consecutiveStableCount) + "/" + strconv.Itoa(fileStabilityCheckCount))
+				}
+
 				fileInfo, err := fs.Stat(filePath)
 				if err != nil {
 					log.Println("error:", err)
 					return
 				}
-				if fileInfo.Size() == lastSize {
-					stable = true
-					break
+
+				currentSize := fileInfo.Size()
+				if currentSize == lastSize {
+					consecutiveStableCount++
+					if consecutiveStableCount >= fileStabilityCheckCount {
+						if verbose {
+							log.Println(fmt.Sprintf("Checking stability for %s: Consecutive readings with same size: %d/%d -> OK, ready for Upload.", filePath, consecutiveStableCount, fileStabilityCheckCount))
+						}
+						readyForUpload <- filePath
+						return
+					}
+				} else {
+					consecutiveStableCount = 0
 				}
-				lastSize = fileInfo.Size()
+
+				lastSize = currentSize
 				time.Sleep(fileStabilityCheckInterval)
-			}
-			if stable {
-				readyForUpload <- filePath
 			}
 		}(filePath)
 	}
@@ -286,64 +317,6 @@ func uploadFile(fs FileSystem, client HTTPClient, filePath string) error {
 
 	return nil
 }
-
-/* func uploadFile_old(fs FileSystem, client HTTPClient, filePath string) error {
-	file, err := fs.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-
-	// Create the document part
-	part, err := writer.CreateFormFile("document", filepath.Base(file.Name()))
-	if err != nil {
-		return err
-	}
-
-	_, err = io.Copy(part, file)
-	if err != nil {
-		return err
-	}
-
-	// Extract the filename and set it as the title
-	title := filepath.Base(filePath)
-	err = writer.WriteField("title", title)
-	if err != nil {
-		return err
-	}
-
-	err = writer.Close()
-	if err != nil {
-		return err
-	}
-
-	url := strings.TrimSuffix(paperlessBaseURL, "/") + "/api/documents/post_document/"
-	req, err := http.NewRequest("POST", url, body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("Authorization", "Token "+paperlessAuthToken)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		uploadRetries.Inc()
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		uploadRetries.Inc()
-		responseBody, _ := io.ReadAll(resp.Body)
-		log.Printf("Failed to upload document: Status %d, Response: %s", resp.StatusCode, string(responseBody))
-		return errors.New("failed to upload document")
-	}
-
-	return nil
-} */
 
 func isWhitelisted(filename string) bool {
 	ext := strings.ToLower(filepath.Ext(filename))
