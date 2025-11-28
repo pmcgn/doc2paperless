@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -20,49 +21,53 @@ import (
 )
 
 var (
-	readyForUpload             = make(chan string)
-	fileStabilityConfirmation  = make(chan string)
-	successfulUploads          = prometheus.NewCounter(prometheus.CounterOpts{Name: "successful_uploads", Help: "Number of successful uploads"})
-	failedUploads              = prometheus.NewCounter(prometheus.CounterOpts{Name: "failed_uploads", Help: "Number of failed uploads"})
-	uploadRetries              = prometheus.NewCounter(prometheus.CounterOpts{Name: "upload_retries", Help: "Number of upload retries"})
-	paperlessBaseURL           string
-	paperlessAuthToken         string
-	watchPath                  string
-	fileStabilityCheckInterval time.Duration
-	fileStabilityCheckCount    int
-	retryDelay                 time.Duration
-	version                    = "dev"
-	whitelist                  string
-	verbose                    bool
+	// We use a Map to track active uploads to prevent duplicate processing
+	processingFiles   = make(map[string]bool)
+	processingMutex   sync.Mutex
+	successfulUploads = prometheus.NewCounter(prometheus.CounterOpts{Name: "successful_uploads", Help: "Number of successful uploads"})
+	failedUploads     = prometheus.NewCounter(prometheus.CounterOpts{Name: "failed_uploads", Help: "Number of failed uploads"})
+	uploadRetries     = prometheus.NewCounter(prometheus.CounterOpts{Name: "upload_retries", Help: "Number of upload retries"})
+	
+	paperlessBaseURL  string
+	paperlessAuthToken string
+	watchPath         string
+	settleTime        time.Duration // Time to wait after last write
+	retryDelay        time.Duration
+	version           = "dev"
+	whitelist         string
+	verbose           bool
 )
 
-type FileSystem interface {
-	Open(name string) (io.ReadCloser, error)
-	ReadDir(dirname string) ([]os.DirEntry, error)
-	Stat(name string) (os.FileInfo, error)
-	Remove(name string) error
+// TimerMap handles the "Debounce" logic.
+// It tracks when a file was last modified and triggers a callback when it settles.
+type TimerMap struct {
+	sync.Mutex
+	timers map[string]*time.Timer
+}
+
+func (tm *TimerMap) Reset(filePath string, duration time.Duration, onFinish func()) {
+	tm.Lock()
+	defer tm.Unlock()
+
+	// If a timer already exists for this file, stop it (debounce)
+	if t, ok := tm.timers[filePath]; ok {
+		t.Stop()
+	}
+
+	// Create a new timer that triggers the upload
+	tm.timers[filePath] = time.AfterFunc(duration, func() {
+		// Clean up the map entry when the timer fires
+		tm.Lock()
+		delete(tm.timers, filePath)
+		tm.Unlock()
+		
+		// Execute the callback
+		onFinish()
+	})
 }
 
 type HTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
-}
-
-type RealFileSystem struct{}
-
-func (RealFileSystem) Open(name string) (io.ReadCloser, error) {
-	return os.Open(name)
-}
-
-func (RealFileSystem) ReadDir(dirname string) ([]os.DirEntry, error) {
-	return os.ReadDir(dirname)
-}
-
-func (RealFileSystem) Stat(name string) (os.FileInfo, error) {
-	return os.Stat(name)
-}
-
-func (RealFileSystem) Remove(name string) error {
-	return os.Remove(name)
 }
 
 type RealHTTPClient struct{}
@@ -74,43 +79,35 @@ func (RealHTTPClient) Do(req *http.Request) (*http.Response, error) {
 func init() {
 	prometheus.MustRegister(successfulUploads, failedUploads, uploadRetries)
 
+	// Defaults (can be overridden by Env vars)
 	os.Setenv("CONSUME_FOLDER", "c:/temp")
 	os.Setenv("FILE_CONSUME_WHITELIST", "*.pdf")
 	os.Setenv("HTTP_UPLOAD_RETRY_DELAY_SECONDS", "5s")
-	os.Setenv("FILE_STABILITY_CHECK_COUNT", "3")
-	os.Setenv("FILE_STABILITY_CHECK_INTERVAL_SECONDS", "2s")
-	//os.Setenv("PAPERLESS_AUTH_TOKEN", "57d6be2cd6968cf189dafcb989d4610d6274b923")
-	//os.Setenv("PAPERLESS_BASE_URL", "http://192.168.2.147:8000")
-	//os.Setenv("VERBOSE", "true")
+	os.Setenv("FILE_STABILITY_WAIT_SECONDS", "5s") // Increased default for scanners
 }
 
 func main() {
 	log.Println("Starting doc2paperless Version: " + version)
-
 	loadConfig()
 
 	if verbose {
-		log.Println("Verbose logging is enabled.")
+		log.Println("Verbose logging enabled.")
 	}
 
 	http.Handle("/metrics", promhttp.Handler())
 	http.HandleFunc("/health/liveness", livenessHandler)
-	http.HandleFunc("/health/readiness", readinessHandler)
 
 	go func() {
 		log.Fatal(http.ListenAndServe(":2112", nil))
 	}()
 
-	fs := RealFileSystem{}
 	client := RealHTTPClient{}
+	
+	// Create the debounce timer map
+	tm := &TimerMap{timers: make(map[string]*time.Timer)}
 
-	go watchFiles(fs)
-
-	go checkFileStability(fs)
-
-	uploadFiles(fs, client)
-
-	select {} // Block forever
+	// Start the watcher
+	watchFiles(tm, client)
 }
 
 func loadConfig() {
@@ -119,21 +116,18 @@ func loadConfig() {
 	paperlessBaseURL = os.Getenv("PAPERLESS_BASE_URL")
 	paperlessAuthToken = os.Getenv("PAPERLESS_AUTH_TOKEN")
 	watchPath = os.Getenv("CONSUME_FOLDER")
+	
 	if paperlessBaseURL == "" || watchPath == "" {
 		log.Fatal("Missing required environment variables: PAPERLESS_BASE_URL, CONSUME_FOLDER")
 	}
 	if paperlessAuthToken == "" {
-		log.Fatal("Environment Variable PAPERLESS_AUTH_TOKEN not set. Note: Currently only Auth token are supported, not Base64(user:pass)")
+		log.Fatal("Environment Variable PAPERLESS_AUTH_TOKEN not set.")
 	}
 
-	fileStabilityCheckInterval, err = time.ParseDuration(os.Getenv("FILE_STABILITY_CHECK_INTERVAL_SECONDS"))
+	// How long to wait after the LAST write event before assuming file is done
+	settleTime, err = time.ParseDuration(os.Getenv("FILE_STABILITY_WAIT_SECONDS"))
 	if err != nil {
-		fileStabilityCheckInterval = 2 * time.Second
-	}
-
-	fileStabilityCheckCount = 5
-	if count := os.Getenv("FILE_STABILITY_CHECK_COUNT"); count != "" {
-		fmt.Sscanf(count, "%d", &fileStabilityCheckCount)
+		settleTime = 5 * time.Second
 	}
 
 	retryDelay, err = time.ParseDuration(os.Getenv("HTTP_UPLOAD_RETRY_DELAY_SECONDS"))
@@ -142,12 +136,9 @@ func loadConfig() {
 	}
 
 	verboseStr := os.Getenv("VERBOSE")
-	verbose = false
-
 	if verboseStr != "" {
-		parsedVerbose, err := strconv.ParseBool(verboseStr)
-		if err == nil {
-			verbose = parsedVerbose
+		if v, err := strconv.ParseBool(verboseStr); err == nil {
+			verbose = v
 		}
 	}
 }
@@ -157,13 +148,7 @@ func livenessHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
-func readinessHandler(w http.ResponseWriter, r *http.Request) {
-	// Implement a real readiness check if needed
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
-}
-
-func watchFiles(fs FileSystem) {
+func watchFiles(tm *TimerMap, client HTTPClient) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatal(err)
@@ -175,16 +160,10 @@ func watchFiles(fs FileSystem) {
 		log.Fatal(err)
 	}
 
-	// Check existing files at startup
-	files, err := os.ReadDir(watchPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-	for _, file := range files {
-		if !file.IsDir() && isWhitelisted(file.Name()) {
-			fileStabilityConfirmation <- filepath.Join(watchPath, file.Name())
-		}
-	}
+	log.Printf("Watching %s for %s", watchPath, whitelist)
+
+	// Process existing files on startup
+	processExistingFiles(tm, client)
 
 	for {
 		select {
@@ -192,78 +171,112 @@ func watchFiles(fs FileSystem) {
 			if !ok {
 				return
 			}
-			if event.Op&fsnotify.Create == fsnotify.Create && isWhitelisted(event.Name) {
-				log.Println("Detected new file. Starting stability check for: " + event.Name)
-				fileStabilityConfirmation <- event.Name
+
+			// We care about Create (new file) and Write (scanner appending data)
+			if event.Op&fsnotify.Create == fsnotify.Create || event.Op&fsnotify.Write == fsnotify.Write {
+				if isWhitelisted(event.Name) {
+					if verbose {
+						log.Println("Activity detected:", event.Name)
+					}
+					
+					// Reset the countdown. The file will only upload if NO events 
+					// happen for 'settleTime' duration.
+					tm.Reset(event.Name, settleTime, func() {
+						handleStableFile(event.Name, client)
+					})
+				}
 			}
+
 		case err, ok := <-watcher.Errors:
 			if !ok {
 				return
 			}
-			log.Println("error:", err)
+			log.Println("Watcher error:", err)
 		}
 	}
 }
 
-func checkFileStability(fs FileSystem) {
-	for filePath := range fileStabilityConfirmation {
-		go func(filePath string) {
-			var lastSize int64
-			consecutiveStableCount := 0
-
-			for {
-				if verbose {
-					log.Println("Checking stability for " + filePath + " Consecutive readings with same size: " + strconv.Itoa(consecutiveStableCount) + "/" + strconv.Itoa(fileStabilityCheckCount))
-				}
-
-				fileInfo, err := fs.Stat(filePath)
-				if err != nil {
-					log.Println("error:", err)
-					return
-				}
-
-				currentSize := fileInfo.Size()
-				if currentSize == lastSize {
-					consecutiveStableCount++
-					if consecutiveStableCount >= fileStabilityCheckCount {
-						if verbose {
-							log.Println(fmt.Sprintf("Checking stability for %s: Consecutive readings with same size: %d/%d -> OK, ready for Upload.", filePath, consecutiveStableCount, fileStabilityCheckCount))
-						}
-						readyForUpload <- filePath
-						return
-					}
-				} else {
-					consecutiveStableCount = 0
-				}
-
-				lastSize = currentSize
-				time.Sleep(fileStabilityCheckInterval)
-			}
-		}(filePath)
+func processExistingFiles(tm *TimerMap, client HTTPClient) {
+	files, err := os.ReadDir(watchPath)
+	if err != nil {
+		log.Println("Error reading directory:", err)
+		return
+	}
+	for _, file := range files {
+		if !file.IsDir() && isWhitelisted(file.Name()) {
+			fullPath := filepath.Join(watchPath, file.Name())
+			log.Println("Found existing file:", fullPath)
+			// Treat existing files as "just modified", trigger the timer logic
+			tm.Reset(fullPath, settleTime, func() {
+				handleStableFile(fullPath, client)
+			})
+		}
 	}
 }
 
-func uploadFiles(fs FileSystem, client HTTPClient) {
-	for filePath := range readyForUpload {
-		go func(filePath string) {
-			for {
-				err := uploadFile(fs, client, filePath)
-				if err == nil {
-					successfulUploads.Inc()
-					log.Printf("Successfully uploaded: %s\n", filePath)
-					fs.Remove(filePath)
-					break
-				}
-				failedUploads.Inc()
-				log.Printf("Failed to upload: %s, retrying...\n", filePath)
-				time.Sleep(retryDelay)
+// handleStableFile is called when the timer expires (no writes for X seconds).
+func handleStableFile(filePath string, client HTTPClient) {
+	// 1. Concurrency Check: Ensure we aren't already uploading this file
+	processingMutex.Lock()
+	if processingFiles[filePath] {
+		processingMutex.Unlock()
+		return
+	}
+	processingFiles[filePath] = true
+	processingMutex.Unlock()
+
+	defer func() {
+		processingMutex.Lock()
+		delete(processingFiles, filePath)
+		processingMutex.Unlock()
+	}()
+
+	// 2. Lock Check: Try to open the file exclusively (or just open it)
+	// If the scanner is still holding the file handle, this will usually fail on Windows,
+	// or return "text file busy" on Linux in some configs.
+	// This is SAFER than checking file size.
+	file, err := os.Open(filePath)
+	if err != nil {
+		if verbose {
+			log.Printf("File %s is stable (time) but cannot be opened (locked?). Retrying later. Error: %v", filePath, err)
+		}
+		// If we can't open it, it's not ready. Reset logic would go here, 
+		// but usually the scanner will trigger more Write events if it's working.
+		return 
+	}
+	file.Close() // Close immediately, we just wanted to check access.
+
+	// 3. Start Upload Loop
+	uploadLoop(filePath, client)
+}
+
+func uploadLoop(filePath string, client HTTPClient) {
+	for {
+		// Final check: does file still exist?
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			return
+		}
+
+		err := uploadFile(client, filePath)
+		if err == nil {
+			successfulUploads.Inc()
+			log.Printf("Successfully uploaded: %s\n", filePath)
+			
+			// Remove the file
+			if err := os.Remove(filePath); err != nil {
+				log.Printf("Warning: uploaded %s but failed to delete: %v", filePath, err)
 			}
-		}(filePath)
+			return
+		}
+		
+		failedUploads.Inc()
+		log.Printf("Failed to upload: %s (%v), retrying in %s...\n", filePath, err, retryDelay)
+		time.Sleep(retryDelay)
 	}
 }
 
-func uploadFile(fs FileSystem, client HTTPClient, filePath string) error {
-	fileReader, err := fs.Open(filePath)
+func uploadFile(client HTTPClient, filePath string) error {
+	fileReader, err := os.Open(filePath)
 	if err != nil {
 		return err
 	}
@@ -303,16 +316,13 @@ func uploadFile(fs FileSystem, client HTTPClient, filePath string) error {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		uploadRetries.Inc()
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		uploadRetries.Inc()
 		responseBody, _ := io.ReadAll(resp.Body)
-		log.Printf("Failed to upload document: Status %d, Response: %s", resp.StatusCode, string(responseBody))
-		return errors.New("failed to upload document")
+		return fmt.Errorf("status %d: %s", resp.StatusCode, string(responseBody))
 	}
 
 	return nil
