@@ -34,6 +34,10 @@ var (
 	version                    = "dev"
 	whitelist                  string
 	verbose                    bool
+	maxConcurrentUploads       int
+	maxConcurrentStabilityChecks int
+	uploadSemaphore            chan struct{}
+	stabilityCheckSemaphore    chan struct{}
 )
 
 type FileSystem interface {
@@ -74,10 +78,11 @@ func (RealHTTPClient) Do(req *http.Request) (*http.Response, error) {
 func init() {
 	prometheus.MustRegister(successfulUploads, failedUploads, uploadRetries)
 
+	// Set default environment variables for development/testing
 	os.Setenv("CONSUME_FOLDER", "c:/temp")
 	os.Setenv("FILE_CONSUME_WHITELIST", "*.pdf")
 	os.Setenv("HTTP_UPLOAD_RETRY_DELAY_SECONDS", "5s")
-	os.Setenv("FILE_STABILITY_CHECK_COUNT", "3")
+	os.Setenv("FILE_STABILITY_CHECK_COUNT", "5")
 	os.Setenv("FILE_STABILITY_CHECK_INTERVAL_SECONDS", "2s")
 	//os.Setenv("PAPERLESS_AUTH_TOKEN", "57d6be2cd6968cf189dafcb989d4610d6274b923")
 	//os.Setenv("PAPERLESS_BASE_URL", "http://192.168.2.147:8000")
@@ -114,11 +119,11 @@ func main() {
 }
 
 func loadConfig() {
-	var err error
-	whitelist = os.Getenv("FILE_CONSUME_WHITELIST")
+	// Required string variables
 	paperlessBaseURL = os.Getenv("PAPERLESS_BASE_URL")
 	paperlessAuthToken = os.Getenv("PAPERLESS_AUTH_TOKEN")
 	watchPath = os.Getenv("CONSUME_FOLDER")
+
 	if paperlessBaseURL == "" || watchPath == "" {
 		log.Fatal("Missing required environment variables: PAPERLESS_BASE_URL, CONSUME_FOLDER")
 	}
@@ -126,30 +131,60 @@ func loadConfig() {
 		log.Fatal("Environment Variable PAPERLESS_AUTH_TOKEN not set. Note: Currently only Auth token are supported, not Base64(user:pass)")
 	}
 
-	fileStabilityCheckInterval, err = time.ParseDuration(os.Getenv("FILE_STABILITY_CHECK_INTERVAL_SECONDS"))
-	if err != nil {
-		fileStabilityCheckInterval = 2 * time.Second
+	// Optional string variables
+	whitelist = getEnvOrDefault("FILE_CONSUME_WHITELIST", "*.pdf")
+
+	// Duration variables
+	fileStabilityCheckInterval = getEnvDuration("FILE_STABILITY_CHECK_INTERVAL_SECONDS", 2*time.Second)
+	retryDelay = getEnvDuration("HTTP_UPLOAD_RETRY_DELAY_SECONDS", 5*time.Second)
+
+	// Integer variables
+	fileStabilityCheckCount = getEnvInt("FILE_STABILITY_CHECK_COUNT", 5)
+	maxConcurrentUploads = getEnvInt("MAX_CONCURRENT_UPLOADS", 1)
+	maxConcurrentStabilityChecks = getEnvInt("MAX_CONCURRENT_STABILITY_CHECKS", 10)
+
+	// Boolean variables
+	verbose = getEnvBool("VERBOSE", false)
+
+	// Initialize semaphores as buffered channels
+	uploadSemaphore = make(chan struct{}, maxConcurrentUploads)
+	stabilityCheckSemaphore = make(chan struct{}, maxConcurrentStabilityChecks)
+
+	log.Printf("Configuration loaded: Max concurrent uploads: %d, Max concurrent stability checks: %d", maxConcurrentUploads, maxConcurrentStabilityChecks)
+}
+
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
+	return defaultValue
+}
 
-	fileStabilityCheckCount = 5
-	if count := os.Getenv("FILE_STABILITY_CHECK_COUNT"); count != "" {
-		fmt.Sscanf(count, "%d", &fileStabilityCheckCount)
-	}
-
-	retryDelay, err = time.ParseDuration(os.Getenv("HTTP_UPLOAD_RETRY_DELAY_SECONDS"))
-	if err != nil {
-		retryDelay = 5 * time.Second
-	}
-
-	verboseStr := os.Getenv("VERBOSE")
-	verbose = false
-
-	if verboseStr != "" {
-		parsedVerbose, err := strconv.ParseBool(verboseStr)
-		if err == nil {
-			verbose = parsedVerbose
+func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := time.ParseDuration(value); err == nil {
+			return parsed
 		}
 	}
+	return defaultValue
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return defaultValue
+}
+
+func getEnvBool(key string, defaultValue bool) bool {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
+			return parsed
+		}
+	}
+	return defaultValue
 }
 
 func livenessHandler(w http.ResponseWriter, r *http.Request) {
@@ -207,8 +242,14 @@ func watchFiles(fs FileSystem) {
 
 func checkFileStability(fs FileSystem) {
 	for filePath := range fileStabilityConfirmation {
+		// Acquire semaphore slot (blocks if limit reached)
+		stabilityCheckSemaphore <- struct{}{}
+
 		go func(filePath string) {
-			var lastSize int64
+			// Release semaphore slot when done
+			defer func() { <-stabilityCheckSemaphore }()
+
+			var lastSize int64 = -1 // Initialize to -1 to force first size reading
 			consecutiveStableCount := 0
 
 			for {
@@ -223,16 +264,30 @@ func checkFileStability(fs FileSystem) {
 				}
 
 				currentSize := fileInfo.Size()
-				if currentSize == lastSize {
-					consecutiveStableCount++
-					if consecutiveStableCount >= fileStabilityCheckCount {
+
+				// Only check stability if this is not the first reading
+				if lastSize != -1 && currentSize == lastSize {
+					// Try to open the file to verify it's not locked
+					f, err := fs.Open(filePath)
+					if err != nil {
+						// File is still locked or inaccessible, reset counter
 						if verbose {
-							log.Println(fmt.Sprintf("Checking stability for %s: Consecutive readings with same size: %d/%d -> OK, ready for Upload.", filePath, consecutiveStableCount, fileStabilityCheckCount))
+							log.Println("File still locked or inaccessible: " + filePath)
 						}
-						readyForUpload <- filePath
-						return
+						consecutiveStableCount = 0
+					} else {
+						f.Close()
+						consecutiveStableCount++
+						if consecutiveStableCount >= fileStabilityCheckCount {
+							if verbose {
+								log.Println(fmt.Sprintf("Checking stability for %s: Consecutive readings with same size: %d/%d -> OK, ready for Upload.", filePath, consecutiveStableCount, fileStabilityCheckCount))
+							}
+							readyForUpload <- filePath
+							return
+						}
 					}
 				} else {
+					// Size changed, reset counter
 					consecutiveStableCount = 0
 				}
 
@@ -245,7 +300,13 @@ func checkFileStability(fs FileSystem) {
 
 func uploadFiles(fs FileSystem, client HTTPClient) {
 	for filePath := range readyForUpload {
+		// Acquire upload semaphore slot (blocks if limit reached)
+		uploadSemaphore <- struct{}{}
+
 		go func(filePath string) {
+			// Release upload semaphore slot when done
+			defer func() { <-uploadSemaphore }()
+
 			for {
 				err := uploadFile(fs, client, filePath)
 				if err == nil {
@@ -319,10 +380,13 @@ func uploadFile(fs FileSystem, client HTTPClient, filePath string) error {
 }
 
 func isWhitelisted(filename string) bool {
-	ext := strings.ToLower(filepath.Ext(filename))
-	whitelistedExtensions := strings.Split(strings.ToLower(whitelist), ",")
-	for _, pattern := range whitelistedExtensions {
-		if matched, _ := filepath.Match(pattern, ext); matched {
+	// Extract just the filename from the full path
+	baseName := strings.ToLower(filepath.Base(filename))
+	whitelistedPatterns := strings.Split(strings.ToLower(whitelist), ",")
+	for _, pattern := range whitelistedPatterns {
+		pattern = strings.TrimSpace(pattern)
+		// Match against full filename, not just extension
+		if matched, _ := filepath.Match(pattern, baseName); matched {
 			return true
 		}
 	}

@@ -1,6 +1,6 @@
 module doc2paperless
 
-go 1.24.4
+go 1.25.6
 
 require (
 	github.com/fsnotify/fsnotify v1.9.0
