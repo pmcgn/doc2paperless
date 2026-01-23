@@ -201,19 +201,20 @@ func readinessHandler(w http.ResponseWriter, r *http.Request) {
 func watchFiles(fs FileSystem) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to create file watcher: %v", err)
 	}
 	defer watcher.Close()
 
+	log.Printf("Watching directory: %s", watchPath)
 	err = watcher.Add(watchPath)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to watch directory '%s': %v. Please ensure the directory exists and is mounted correctly.", watchPath, err)
 	}
 
 	// Check existing files at startup
 	files, err := os.ReadDir(watchPath)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to read directory '%s': %v", watchPath, err)
 	}
 	for _, file := range files {
 		if !file.IsDir() && isWhitelisted(file.Name()) {
