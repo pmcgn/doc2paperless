@@ -20,24 +20,24 @@ import (
 )
 
 var (
-	readyForUpload             = make(chan string)
-	fileStabilityConfirmation  = make(chan string)
-	successfulUploads          = prometheus.NewCounter(prometheus.CounterOpts{Name: "successful_uploads", Help: "Number of successful uploads"})
-	failedUploads              = prometheus.NewCounter(prometheus.CounterOpts{Name: "failed_uploads", Help: "Number of failed uploads"})
-	uploadRetries              = prometheus.NewCounter(prometheus.CounterOpts{Name: "upload_retries", Help: "Number of upload retries"})
-	paperlessBaseURL           string
-	paperlessAuthToken         string
-	watchPath                  string
-	fileStabilityCheckInterval time.Duration
-	fileStabilityCheckCount    int
-	retryDelay                 time.Duration
-	version                    = "dev"
-	whitelist                  string
-	verbose                    bool
-	maxConcurrentUploads       int
+	readyForUpload               = make(chan string)
+	fileStabilityConfirmation    = make(chan string)
+	successfulUploads            = prometheus.NewCounter(prometheus.CounterOpts{Name: "successful_uploads", Help: "Number of successful uploads"})
+	failedUploads                = prometheus.NewCounter(prometheus.CounterOpts{Name: "failed_uploads", Help: "Number of failed uploads"})
+	uploadRetries                = prometheus.NewCounter(prometheus.CounterOpts{Name: "upload_retries", Help: "Number of upload retries"})
+	paperlessBaseURL             string
+	paperlessAuthToken           string
+	watchPath                    string
+	fileStabilityCheckInterval   time.Duration
+	fileStabilityCheckCount      int
+	retryDelay                   time.Duration
+	version                      = "dev"
+	whitelist                    string
+	verbose                      bool
+	maxConcurrentUploads         int
 	maxConcurrentStabilityChecks int
-	uploadSemaphore            chan struct{}
-	stabilityCheckSemaphore    chan struct{}
+	uploadSemaphore              chan struct{}
+	stabilityCheckSemaphore      chan struct{}
 )
 
 type FileSystem interface {
@@ -77,16 +77,6 @@ func (RealHTTPClient) Do(req *http.Request) (*http.Response, error) {
 
 func init() {
 	prometheus.MustRegister(successfulUploads, failedUploads, uploadRetries)
-
-	// Set default environment variables for development/testing
-	os.Setenv("CONSUME_FOLDER", "c:/temp")
-	os.Setenv("FILE_CONSUME_WHITELIST", "*.pdf")
-	os.Setenv("HTTP_UPLOAD_RETRY_DELAY_SECONDS", "5s")
-	os.Setenv("FILE_STABILITY_CHECK_COUNT", "5")
-	os.Setenv("FILE_STABILITY_CHECK_INTERVAL_SECONDS", "2s")
-	//os.Setenv("PAPERLESS_AUTH_TOKEN", "57d6be2cd6968cf189dafcb989d4610d6274b923")
-	//os.Setenv("PAPERLESS_BASE_URL", "http://192.168.2.147:8000")
-	//os.Setenv("VERBOSE", "true")
 }
 
 func main() {
