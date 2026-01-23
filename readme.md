@@ -72,7 +72,7 @@ All configuration is done through environment variables.
 To get your Paperless-ngx authentication token:
 
 1. Log in to your Paperless-ngx web interface
-2. Go to **Settings** → **API Tokens** (or navigate to `/admin/authtoken/token/`)
+2. Go to **Settings** → **Django Adminpanel** → **Tokens** (or navigate to `/admin/authtoken/tokenproxy/`)
 3. Create a new token or copy an existing one
 4. Use this token for the `PAPERLESS_AUTH_TOKEN` environment variable
 
