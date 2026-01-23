@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -291,11 +290,9 @@ func checkFileStability(fs FileSystem) {
 
 func uploadFiles(fs FileSystem, client HTTPClient) {
 	for filePath := range readyForUpload {
-		// Acquire upload semaphore slot (blocks if limit reached)
 		uploadSemaphore <- struct{}{}
 
 		go func(filePath string) {
-			// Release upload semaphore slot when done
 			defer func() { <-uploadSemaphore }()
 
 			for {
@@ -306,8 +303,10 @@ func uploadFiles(fs FileSystem, client HTTPClient) {
 					fs.Remove(filePath)
 					break
 				}
+
 				failedUploads.Inc()
-				log.Printf("Failed to upload: %s, retrying...\n", filePath)
+				// Enhanced logging: now prints the detailed error returned by uploadFile
+				log.Printf("Failed to upload %s: %v. Retrying in %v...\n", filePath, err, retryDelay)
 				time.Sleep(retryDelay)
 			}
 		}(filePath)
@@ -317,7 +316,7 @@ func uploadFiles(fs FileSystem, client HTTPClient) {
 func uploadFile(fs FileSystem, client HTTPClient, filePath string) error {
 	fileReader, err := fs.Open(filePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("file open error: %w", err)
 	}
 	defer fileReader.Close()
 
@@ -326,45 +325,50 @@ func uploadFile(fs FileSystem, client HTTPClient, filePath string) error {
 
 	part, err := writer.CreateFormFile("document", filepath.Base(filePath))
 	if err != nil {
-		return err
+		return fmt.Errorf("form file creation error: %w", err)
 	}
 
-	_, err = io.Copy(part, fileReader)
-	if err != nil {
-		return err
+	if _, err = io.Copy(part, fileReader); err != nil {
+		return fmt.Errorf("io copy error: %w", err)
 	}
 
-	title := filepath.Base(filePath)
-	err = writer.WriteField("title", title)
-	if err != nil {
-		return err
+	if err := writer.WriteField("title", filepath.Base(filePath)); err != nil {
+		return fmt.Errorf("write field error: %w", err)
 	}
 
-	err = writer.Close()
-	if err != nil {
-		return err
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("writer close error: %w", err)
 	}
 
 	url := strings.TrimSuffix(paperlessBaseURL, "/") + "/api/documents/post_document/"
 	req, err := http.NewRequest("POST", url, body)
 	if err != nil {
-		return err
+		return fmt.Errorf("request creation error: %w", err)
 	}
+
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Authorization", "Token "+paperlessAuthToken)
 
 	resp, err := client.Do(req)
 	if err != nil {
 		uploadRetries.Inc()
-		return err
+		return fmt.Errorf("client do error: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	// Handle non-OK status codes with detailed info
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		uploadRetries.Inc()
+
+		// Read the error body from the server
 		responseBody, _ := io.ReadAll(resp.Body)
-		log.Printf("Failed to upload document: Status %d, Response: %s", resp.StatusCode, string(responseBody))
-		return errors.New("failed to upload document")
+
+		// Return a descriptive error containing status code and server message
+		return fmt.Errorf("server returned %d %s: %s",
+			resp.StatusCode,
+			http.StatusText(resp.StatusCode),
+			string(responseBody),
+		)
 	}
 
 	return nil
