@@ -42,6 +42,27 @@ Use `doc2paperless` when:
 
 > **⚠️ NOTE:** Do not run `doc2paperless` and Paperless-ngx on the same machine watching the same folder. They use identical file-watching mechanisms and will conflict.
 
+## Paperless-ngx permissions
+
+When uploading a document via the API, paperless will automatically set the document owner to the owner of the Auth Token. If this is what you want, ignore the follwoing instructions. 
+The only option to remove the owner (make the document visible for everyone) is to create a workflow, which deletes the owner automatically after processing the document.
+
+To create the workflow, follow these steps:
+
+1. Open the paperless-ngx ui (with any user)
+2. Go to **Workflows** in the left bar
+3. Click **Add Workflow** in the upper right corner
+4. Assign a name, sort order and enable it
+5. Unfold **Triggers** and press **Add Trigger**
+6. Select the new trigger and change Trigger Typer to **Document Added**
+7. Unfold Actions and press **Add Action**
+8. Set Action Type to **Removal**
+9. Enable Switch next to **Remove All** below **Remove Owners**
+10. Save Workflow
+
+That's it! Now the owner will be deleted, after the document has been processed and added to the inventory.
+
+
 ## Configuration
 
 All configuration is done through environment variables.
@@ -57,8 +78,8 @@ All configuration is done through environment variables.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CONSUME_FOLDER` | Directory to watch for new files | `/consumefolder` |
-| `FILE_CONSUME_WHITELIST` | File patterns to process (comma-separated) | `*.pdf` |
+| `CONSUME_FOLDER` | Directory to watch for new files inside container.<br>There is no need to change it!<br>Mount the folder where your scanner stores the documents into this folder | `/consumefolder` |
+| `FILE_CONSUME_WHITELIST` | File types to upload (comma-separated) | `*.pdf` |
 | `FILE_STABILITY_CHECK_INTERVAL_SECONDS` | Time between stability checks | `2s` |
 | `FILE_STABILITY_CHECK_COUNT` | Number of stable checks required before upload | `5` |
 | `HTTP_UPLOAD_RETRY_DELAY_SECONDS` | Delay between upload retry attempts | `5s` |
@@ -71,10 +92,17 @@ All configuration is done through environment variables.
 
 To get your Paperless-ngx authentication token:
 
+1. Click on your unsername in the top right corner
+2. Select **My Profile**
+3. Copy the **API Auth Token**, if nothing is shown, press the 'Regenerate Auth Token' button
+
+Alternative:
+
 1. Log in to your Paperless-ngx web interface
 2. Go to **Settings** → **Django Adminpanel** → **Tokens** (or navigate to `/admin/authtoken/tokenproxy/`)
 3. Create a new token or copy an existing one
 4. Use this token for the `PAPERLESS_AUTH_TOKEN` environment variable
+
 
 ### File Stability Detection
 
@@ -104,9 +132,9 @@ When multiple files arrive simultaneously:
 docker run -d \
   --name doc2paperless \
   --restart unless-stopped \
-  -e PAPERLESS_BASE_URL="http://192.168.1.100:8000" \
+  -e PAPERLESS_BASE_URL="https://192.168.1.100:8000" \
   -e PAPERLESS_AUTH_TOKEN="your-token-here" \
-  -v /mnt/scanner:/consumefolder \
+  -v /path/to/scanner/folder:/consumefolder \
   -p 2112:2112 \
   pmcgn/doc2paperless:latest
 ```
@@ -125,7 +153,7 @@ docker run -d \
   -e MAX_CONCURRENT_UPLOADS="2" \
   -e VERBOSE="true" \
   -e TZ="America/New_York" \
-  -v /mnt/scanner:/consumefolder \
+  -v /path/to/scanner/folder:/consumefolder \
   -p 2112:2112 \
   pmcgn/doc2paperless:latest
 ```
